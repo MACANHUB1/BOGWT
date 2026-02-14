@@ -1,0 +1,668 @@
+local plr = game.Players.LocalPlayer
+local char = plr.Character or plr.CharacterAdded:Wait()
+local hrp = char:WaitForChild("HumanoidRootPart")
+local mouse = plr:GetMouse()
+local camera = workspace.CurrentCamera
+
+local ev = game.ReplicatedStorage.RocketSystem.Events
+local fx = ev.RocketReloadedFX
+local fire = ev.FireRocketReplicated
+local hitEv = ev.RocketHit
+local cnt = 0
+
+local spamActive = false
+local clickMode = false
+local drawMode = false
+local spamThreads = {}
+local mouseDown = false
+local MIN_DISTANCE = 20
+local CELL_SPACING = 12 -- расстояние между взрывами в studs (было 3, теперь 12)
+local GRID_SIZE = 16
+
+local function findRPG()
+	if char and char:FindFirstChild("RPG") then return char.RPG end
+	local bp = plr:FindFirstChild("Backpack")
+	if bp and bp:FindFirstChild("RPG") then return bp.RPG end
+	return nil
+end
+
+local function findCurrentTool()
+	if not char then return nil end
+	for _, item in ipairs(char:GetChildren()) do
+		if item:IsA("Tool") then return item end
+	end
+	return nil
+end
+
+local function findCurrentVehicle()
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+	local seat = hum.SeatPart
+	if seat then
+		local model = seat:FindFirstAncestorOfClass("Model")
+		if model then return model end
+	end
+	return nil
+end
+
+local function getCreditWeapon()
+	local veh = findCurrentVehicle()
+	if veh then return veh end
+	local tool = findCurrentTool()
+	if tool then return tool end
+	return findRPG()
+end
+
+local disabledScripts = {}
+local childAddedConn = nil
+
+local function nukeToolScripts(tool)
+	if not tool then return end
+	for _, desc in ipairs(tool:GetDescendants()) do
+		if desc:IsA("LocalScript") and desc.Enabled then
+			disabledScripts[desc] = true
+			desc.Enabled = false
+		end
+		if desc:IsA("RemoteEvent") or desc:IsA("RemoteFunction") then
+			pcall(function() desc:Destroy() end)
+		end
+	end
+end
+
+local function restoreToolScripts()
+	for s, _ in pairs(disabledScripts) do
+		pcall(function() if s and s.Parent then s.Enabled = true end end)
+	end
+	disabledScripts = {}
+end
+
+local function blockCurrentTools()
+	if not char then return end
+	for _, item in ipairs(char:GetChildren()) do
+		if item:IsA("Tool") and item.Name ~= "RPG" then nukeToolScripts(item) end
+	end
+end
+
+local function startBlocking()
+	blockCurrentTools()
+	if childAddedConn then childAddedConn:Disconnect() end
+	childAddedConn = char.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") and child.Name ~= "RPG" and (clickMode or spamActive or drawMode) then
+			task.wait(0.05); nukeToolScripts(child)
+		end
+	end)
+end
+
+local function stopBlocking()
+	if childAddedConn then childAddedConn:Disconnect(); childAddedConn = nil end
+	restoreToolScripts()
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function getAimPosition()
+	local fl = {}
+	if char then table.insert(fl, char) end
+	local rf = workspace:FindFirstChild("RocketSystem")
+	if rf then table.insert(fl, rf) end
+	local veh = findCurrentVehicle()
+	if veh then table.insert(fl, veh) end
+	rayParams.FilterDescendantsInstances = fl
+
+	local cp2 = camera.CFrame.Position
+	local cd = camera.CFrame.LookVector
+	local r = workspace:Raycast(cp2, cd * 5000, rayParams)
+	local pos, part
+
+	if r then
+		pos = r.Position; part = r.Instance
+		local m = part:FindFirstAncestorOfClass("Model")
+		if m and m == char then
+			local r2 = workspace:Raycast(pos + cd, cd * 5000, rayParams)
+			if r2 then pos = r2.Position; part = r2.Instance
+			else pos = cp2 + cd * 4000; part = nil end
+		end
+	else pos = cp2 + cd * 4000; part = nil end
+
+	if hrp and (pos - hrp.Position).Magnitude < MIN_DISTANCE then
+		pos = hrp.Position + cd * MIN_DISTANCE
+	end
+	return pos, part
+end
+
+local function attackPosition(pos, hitPart)
+	local rpg = findRPG()
+	if not rpg or not hrp or not hrp.Parent then return end
+	local credit = getCreditWeapon() or rpg
+	local cd = camera.CFrame.LookVector
+
+	if (pos - hrp.Position).Magnitude < MIN_DISTANCE then
+		pos = hrp.Position + cd * MIN_DISTANCE
+	end
+	if hitPart then
+		local m = hitPart:FindFirstAncestorOfClass("Model")
+		if m and m == char then hitPart = workspace.Terrain end
+	end
+
+	local dir = (pos - hrp.Position)
+	dir = dir.Magnitude < 0.1 and cd or dir.Unit
+	local origin = hrp.Position + dir * 10
+
+	pcall(function() fx:FireServer(rpg, false) end)
+	pcall(function()
+		fire:FireServer({
+			Direction=dir,
+			Settings={expShake={fadeInTime=0.05,magnitude=3,rotInfluence=Vector3.new(0.4,0,0.4),fadeOutTime=0.5,posInfluence=Vector3.new(1,1,0),roughness=3},
+			gravity=Vector3.new(0,-20,0),HelicopterDamage=450,FireRate=15,VehicleDamage=350,ExpName="RPG",
+			RocketAmount=1,ExpRadius=12,BoatDamage=300,TankDamage=300,Acceleration=8,ShieldDamage=170,
+			Distance=4000,PlaneDamage=500,GunshipDamage=170,velocity=200,ExplosionDamage=120},
+			Origin=origin,PlrFired=plr,Vehicle=credit,
+			RocketModel=game.ReplicatedStorage.RocketSystem.Rockets["RPG Rocket"],Weapon=credit,
+		})
+	end)
+	pcall(function()
+		hitEv:FireServer({Normal=Vector3.new(0,1,0),HitPart=hitPart or workspace.Terrain,Position=pos,
+			Label=plr.Name.."Rocket"..cnt,Vehicle=credit,Player=plr,Weapon=credit})
+	end)
+	cnt = cnt + 1
+end
+
+local function attackPlayer(player)
+	if not player or not player.Character or player == plr then return end
+	local wHrp = player.Character:FindFirstChild("HumanoidRootPart")
+	if not wHrp then return end
+	attackPosition(wHrp.Position, wHrp)
+end
+
+local function stopSpam()
+	spamActive = false; clickMode = false; drawMode = false
+	for _, thread in pairs(spamThreads) do pcall(task.cancel, thread) end
+	spamThreads = {}
+	stopBlocking()
+end
+
+local function startTargetSpam(targets)
+	stopSpam(); spamActive = true; startBlocking()
+	spamThreads["main"] = task.spawn(function()
+		while spamActive do
+			for _, p in ipairs(targets) do
+				if p and p.Character and p ~= plr then
+					for i=1,3 do task.spawn(attackPlayer, p) end
+				end
+			end
+			task.wait(0.05)
+		end
+	end)
+	for i=1,3 do
+		spamThreads["t"..i] = task.spawn(function()
+			while spamActive do
+				for _, p in ipairs(targets) do
+					if p and p.Character and p ~= plr then task.spawn(attackPlayer, p) end
+				end
+				task.wait(0.03)
+			end
+		end)
+	end
+end
+
+local function startClickMode()
+	stopSpam(); clickMode = true; spamActive = true; startBlocking()
+	spamThreads["click"] = task.spawn(function()
+		while spamActive and clickMode do
+			if mouseDown then
+				local pos, part = getAimPosition()
+				for i=1,3 do task.spawn(attackPosition, pos, part) end
+			end
+			task.wait(0.04)
+		end
+	end)
+	for i=1,2 do
+		spamThreads["e"..i] = task.spawn(function()
+			while spamActive and clickMode do
+				if mouseDown then
+					local pos, part = getAimPosition()
+					task.spawn(attackPosition, pos, part)
+				end
+				task.wait(0.05)
+			end
+		end)
+	end
+	spamThreads["block"] = task.spawn(function()
+		while spamActive and clickMode do pcall(blockCurrentTools); task.wait(0.15) end
+	end)
+end
+
+-- ======================== DRAW ========================
+
+local drawGrid = {}
+
+local function initGrid()
+	drawGrid = {}
+	for r = 1, GRID_SIZE do
+		drawGrid[r] = {}
+		for c = 1, GRID_SIZE do
+			drawGrid[r][c] = false
+		end
+	end
+end
+initGrid()
+
+local function getDrawPoints()
+	local points = {}
+	for r = 1, GRID_SIZE do
+		for c = 1, GRID_SIZE do
+			if drawGrid[r][c] then
+				local x = (c - GRID_SIZE / 2 - 0.5) * CELL_SPACING
+				local y = (GRID_SIZE / 2 + 0.5 - r) * CELL_SPACING
+				table.insert(points, Vector3.new(x, y, 0))
+			end
+		end
+	end
+	return points
+end
+
+local function startDrawMode()
+	stopSpam()
+	local points = getDrawPoints()
+	if #points == 0 then return false end
+
+	drawMode = true; spamActive = true; startBlocking()
+
+	spamThreads["draw"] = task.spawn(function()
+		while spamActive and drawMode do
+			if mouseDown then
+				local aimPos, aimPart = getAimPosition()
+				local right = camera.CFrame.RightVector
+				local up = camera.CFrame.UpVector
+
+				for _, offset in ipairs(points) do
+					task.spawn(function()
+						local worldPos = aimPos + right * offset.X + up * offset.Y
+						attackPosition(worldPos, aimPart)
+					end)
+				end
+			end
+			task.wait(0.08)
+		end
+	end)
+
+	spamThreads["drawBlock"] = task.spawn(function()
+		while spamActive and drawMode do pcall(blockCurrentTools); task.wait(0.15) end
+	end)
+
+	return true
+end
+
+plr.CharacterAdded:Connect(function(newChar)
+	char = newChar; hrp = newChar:WaitForChild("HumanoidRootPart")
+	if clickMode or spamActive or drawMode then task.wait(0.3); startBlocking() end
+end)
+
+-- ================================================================
+-- GUI
+-- ================================================================
+
+if plr.PlayerGui:FindFirstChild("RPGGui") then plr.PlayerGui.RPGGui:Destroy() end
+
+local UIS = game:GetService("UserInputService")
+local C = {
+	bg=Color3.fromRGB(18,18,18), header=Color3.fromRGB(12,12,12),
+	tab=Color3.fromRGB(30,30,30), tabAct=Color3.fromRGB(55,55,55),
+	btn=Color3.fromRGB(40,40,40), btnHov=Color3.fromRGB(60,60,60),
+	on=Color3.fromRGB(70,200,70), off=Color3.fromRGB(200,55,55),
+	warn=Color3.fromRGB(255,200,50), text=Color3.fromRGB(215,215,215),
+	textDim=Color3.fromRGB(130,130,130), scroll=Color3.fromRGB(25,25,25),
+	sel=Color3.fromRGB(50,50,50), stroke=Color3.fromRGB(65,65,65),
+	cellOff=Color3.fromRGB(35,35,35), cellOn=Color3.fromRGB(220,220,220),
+}
+
+local sg = Instance.new("ScreenGui")
+sg.Name="RPGGui"; sg.ResetOnSpawn=false; sg.Parent=plr.PlayerGui
+
+local cellSize = math.floor((300 - 12 - GRID_SIZE - 1) / GRID_SIZE)
+local gridPixels = cellSize * GRID_SIZE + (GRID_SIZE - 1)
+local neededH = 56 + gridPixels + 6 + 30 + 46 + 10
+
+local main = Instance.new("Frame")
+main.Size=UDim2.new(0,300,0,neededH); main.Position=UDim2.new(0.5,-150,0.5,-neededH/2)
+main.BackgroundColor3=C.bg; main.BorderSizePixel=0; main.Parent=sg
+Instance.new("UICorner",main).CornerRadius=UDim.new(0,8)
+Instance.new("UIStroke",main).Color=C.stroke
+local fullSize = main.Size
+
+local hdr=Instance.new("Frame"); hdr.Size=UDim2.new(1,0,0,28); hdr.BackgroundColor3=C.header
+hdr.BorderSizePixel=0; hdr.Parent=main
+Instance.new("UICorner",hdr).CornerRadius=UDim.new(0,8)
+local hf=Instance.new("Frame"); hf.Size=UDim2.new(1,0,0,8); hf.Position=UDim2.new(0,0,1,-8)
+hf.BackgroundColor3=C.header; hf.BorderSizePixel=0; hf.Parent=hdr
+
+local tl=Instance.new("TextLabel")
+tl.Size=UDim2.new(1,-60,1,0); tl.Position=UDim2.new(0,10,0,0); tl.BackgroundTransparency=1
+tl.Text="я бог вт"; tl.TextColor3=C.text; tl.TextSize=13; tl.Font=Enum.Font.GothamBold
+tl.TextXAlignment=Enum.TextXAlignment.Left; tl.Parent=hdr
+
+local minBtn=Instance.new("TextButton")
+minBtn.Size=UDim2.new(0,24,0,20); minBtn.Position=UDim2.new(1,-52,0,4)
+minBtn.BackgroundColor3=Color3.fromRGB(45,45,45); minBtn.BorderSizePixel=0; minBtn.Text="—"
+minBtn.TextColor3=C.text; minBtn.TextSize=14; minBtn.Font=Enum.Font.GothamBold; minBtn.Parent=hdr
+Instance.new("UICorner",minBtn).CornerRadius=UDim.new(0,4)
+
+local clsBtn=Instance.new("TextButton")
+clsBtn.Size=UDim2.new(0,24,0,20); clsBtn.Position=UDim2.new(1,-26,0,4)
+clsBtn.BackgroundColor3=Color3.fromRGB(180,50,50); clsBtn.BorderSizePixel=0; clsBtn.Text="✕"
+clsBtn.TextColor3=Color3.new(1,1,1); clsBtn.TextSize=12; clsBtn.Font=Enum.Font.GothamBold; clsBtn.Parent=hdr
+Instance.new("UICorner",clsBtn).CornerRadius=UDim.new(0,4)
+
+local dg,ds2,sp2
+hdr.InputBegan:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.MouseButton1 then
+		dg=true; ds2=i.Position; sp2=main.Position
+		i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dg=false end end)
+	end
+end)
+UIS.InputChanged:Connect(function(i)
+	if dg and i.UserInputType==Enum.UserInputType.MouseMovement then
+		local d=i.Position-ds2
+		main.Position=UDim2.new(sp2.X.Scale,sp2.X.Offset+d.X,sp2.Y.Scale,sp2.Y.Offset+d.Y)
+	end
+end)
+
+local tbr=Instance.new("Frame")
+tbr.Size=UDim2.new(1,0,0,26); tbr.Position=UDim2.new(0,0,0,28); tbr.BackgroundColor3=C.bg
+tbr.BorderSizePixel=0; tbr.Parent=main
+
+local function mkTab(name,px)
+	local b=Instance.new("TextButton")
+	b.Size=UDim2.new(1/3,0,1,0); b.Position=UDim2.new(px,0,0,0); b.BackgroundColor3=C.tab
+	b.BorderSizePixel=0; b.Text=name; b.TextColor3=C.textDim; b.TextSize=11
+	b.Font=Enum.Font.GothamSemibold; b.Parent=tbr; return b
+end
+
+local t1=mkTab("клик",0)
+local t2=mkTab("таргет",1/3)
+local t3=mkTab("рисунок",2/3)
+
+local ct=Instance.new("Frame")
+ct.Size=UDim2.new(1,-12,1,-60); ct.Position=UDim2.new(0,6,0,56)
+ct.BackgroundTransparency=1; ct.ClipsDescendants=true; ct.Parent=main
+
+-- click page
+local cp=Instance.new("Frame"); cp.Size=UDim2.new(1,0,1,0); cp.BackgroundTransparency=1; cp.Parent=ct
+local cb=Instance.new("TextButton")
+cb.Size=UDim2.new(1,0,0,40); cb.BackgroundColor3=C.btn; cb.BorderSizePixel=0
+cb.Text="старт клик моде"; cb.TextColor3=C.on; cb.TextSize=15; cb.Font=Enum.Font.GothamBold; cb.Parent=cp
+Instance.new("UICorner",cb).CornerRadius=UDim.new(0,6)
+
+-- target page
+local tp=Instance.new("Frame"); tp.Size=UDim2.new(1,0,1,0); tp.BackgroundTransparency=1; tp.Visible=false; tp.Parent=ct
+local ttb=Instance.new("TextButton")
+ttb.Size=UDim2.new(1,0,0,32); ttb.BackgroundColor3=C.btn; ttb.BorderSizePixel=0
+ttb.Text="жми! жми!"; ttb.TextColor3=C.on; ttb.TextSize=13; ttb.Font=Enum.Font.GothamBold; ttb.Parent=tp
+Instance.new("UICorner",ttb).CornerRadius=UDim.new(0,6)
+
+local ts=Instance.new("ScrollingFrame")
+ts.Size=UDim2.new(1,0,1,-38); ts.Position=UDim2.new(0,0,0,36)
+ts.BackgroundColor3=C.scroll; ts.BorderSizePixel=0; ts.ScrollBarThickness=4
+ts.ScrollBarImageColor3=Color3.fromRGB(75,75,75); ts.CanvasSize=UDim2.new(0,0,0,0); ts.Parent=tp
+Instance.new("UICorner",ts).CornerRadius=UDim.new(0,6)
+local tsl=Instance.new("UIListLayout"); tsl.SortOrder=Enum.SortOrder.LayoutOrder; tsl.Padding=UDim.new(0,2); tsl.Parent=ts
+local tsp=Instance.new("UIPadding"); tsp.PaddingTop=UDim.new(0,4); tsp.PaddingBottom=UDim.new(0,4)
+tsp.PaddingLeft=UDim.new(0,4); tsp.PaddingRight=UDim.new(0,4); tsp.Parent=ts
+
+-- draw page
+local dp=Instance.new("Frame"); dp.Size=UDim2.new(1,0,1,0); dp.BackgroundTransparency=1; dp.Visible=false; dp.Parent=ct
+
+-- слайдер размера
+local sizeFrame = Instance.new("Frame")
+sizeFrame.Size = UDim2.new(1, 0, 0, 30)
+sizeFrame.BackgroundTransparency = 1; sizeFrame.Parent = dp
+
+local sizeLabel = Instance.new("TextLabel")
+sizeLabel.Size = UDim2.new(0, 80, 1, 0)
+sizeLabel.BackgroundTransparency = 1; sizeLabel.Text = "размер: "..CELL_SPACING
+sizeLabel.TextColor3 = C.text; sizeLabel.TextSize = 11; sizeLabel.Font = Enum.Font.GothamBold
+sizeLabel.TextXAlignment = Enum.TextXAlignment.Left; sizeLabel.Parent = sizeFrame
+
+local sizeMinus = Instance.new("TextButton")
+sizeMinus.Size = UDim2.new(0, 30, 0, 24)
+sizeMinus.Position = UDim2.new(0, 85, 0, 3)
+sizeMinus.BackgroundColor3 = C.btn; sizeMinus.BorderSizePixel = 0
+sizeMinus.Text = "-"; sizeMinus.TextColor3 = C.text; sizeMinus.TextSize = 16
+sizeMinus.Font = Enum.Font.GothamBold; sizeMinus.Parent = sizeFrame
+Instance.new("UICorner", sizeMinus).CornerRadius = UDim.new(0, 4)
+
+local sizePlus = Instance.new("TextButton")
+sizePlus.Size = UDim2.new(0, 30, 0, 24)
+sizePlus.Position = UDim2.new(0, 120, 0, 3)
+sizePlus.BackgroundColor3 = C.btn; sizePlus.BorderSizePixel = 0
+sizePlus.Text = "+"; sizePlus.TextColor3 = C.text; sizePlus.TextSize = 16
+sizePlus.Font = Enum.Font.GothamBold; sizePlus.Parent = sizeFrame
+Instance.new("UICorner", sizePlus).CornerRadius = UDim.new(0, 4)
+
+sizeMinus.MouseButton1Click:Connect(function()
+	CELL_SPACING = math.max(3, CELL_SPACING - 3)
+	sizeLabel.Text = "размер: "..CELL_SPACING
+end)
+
+sizePlus.MouseButton1Click:Connect(function()
+	CELL_SPACING = math.min(60, CELL_SPACING + 3)
+	sizeLabel.Text = "размер: "..CELL_SPACING
+end)
+
+-- сетка
+local gridFrame=Instance.new("Frame")
+gridFrame.Size = UDim2.new(0, gridPixels, 0, gridPixels)
+gridFrame.Position = UDim2.new(0.5, -gridPixels/2, 0, 34)
+gridFrame.BackgroundTransparency=1; gridFrame.Parent=dp
+
+local cellButtons = {}
+local isDrawing = false
+local drawValue = true
+
+for r = 1, GRID_SIZE do
+	cellButtons[r] = {}
+	for c2 = 1, GRID_SIZE do
+		local cell = Instance.new("TextButton")
+		cell.Size = UDim2.new(0, cellSize, 0, cellSize)
+		cell.Position = UDim2.new(0, (c2-1)*(cellSize+1), 0, (r-1)*(cellSize+1))
+		cell.BackgroundColor3 = C.cellOff
+		cell.BorderSizePixel = 0; cell.Text = ""; cell.AutoButtonColor = false
+		cell.Parent = gridFrame
+		Instance.new("UICorner", cell).CornerRadius = UDim.new(0, 2)
+		cellButtons[r][c2] = cell
+
+		local row, col = r, c2
+
+		cell.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				isDrawing = true
+				drawGrid[row][col] = not drawGrid[row][col]
+				drawValue = drawGrid[row][col]
+				cell.BackgroundColor3 = drawValue and C.cellOn or C.cellOff
+			end
+		end)
+
+		cell.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				isDrawing = false
+			end
+		end)
+
+		cell.MouseEnter:Connect(function()
+			if isDrawing then
+				drawGrid[row][col] = drawValue
+				cell.BackgroundColor3 = drawValue and C.cellOn or C.cellOff
+			end
+		end)
+	end
+end
+
+local drawBtnY = 34 + gridPixels + 6
+
+local drawStartBtn = Instance.new("TextButton")
+drawStartBtn.Size = UDim2.new(0.48, 0, 0, 30)
+drawStartBtn.Position = UDim2.new(0, 0, 0, drawBtnY)
+drawStartBtn.BackgroundColor3 = C.btn; drawStartBtn.BorderSizePixel = 0
+drawStartBtn.Text = "старт рисунок"; drawStartBtn.TextColor3 = C.on
+drawStartBtn.TextSize = 12; drawStartBtn.Font = Enum.Font.GothamBold; drawStartBtn.Parent = dp
+Instance.new("UICorner", drawStartBtn).CornerRadius = UDim.new(0, 6)
+
+local drawClearBtn = Instance.new("TextButton")
+drawClearBtn.Size = UDim2.new(0.48, 0, 0, 30)
+drawClearBtn.Position = UDim2.new(0.52, 0, 0, drawBtnY)
+drawClearBtn.BackgroundColor3 = C.btn; drawClearBtn.BorderSizePixel = 0
+drawClearBtn.Text = "очистить"; drawClearBtn.TextColor3 = C.off
+drawClearBtn.TextSize = 12; drawClearBtn.Font = Enum.Font.GothamBold; drawClearBtn.Parent = dp
+Instance.new("UICorner", drawClearBtn).CornerRadius = UDim.new(0, 6)
+
+drawClearBtn.MouseButton1Click:Connect(function()
+	initGrid()
+	for r = 1, GRID_SIZE do
+		for c2 = 1, GRID_SIZE do
+			cellButtons[r][c2].BackgroundColor3 = C.cellOff
+		end
+	end
+end)
+
+UIS.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		isDrawing = false
+	end
+end)
+
+-- tab switch
+local function sw(tab)
+	cp.Visible=(tab=="c"); tp.Visible=(tab=="t"); dp.Visible=(tab=="d")
+	t1.BackgroundColor3=tab=="c" and C.tabAct or C.tab; t1.TextColor3=tab=="c" and C.text or C.textDim
+	t2.BackgroundColor3=tab=="t" and C.tabAct or C.tab; t2.TextColor3=tab=="t" and C.text or C.textDim
+	t3.BackgroundColor3=tab=="d" and C.tabAct or C.tab; t3.TextColor3=tab=="d" and C.text or C.textDim
+end
+sw("c")
+t1.MouseButton1Click:Connect(function() sw("c") end)
+t2.MouseButton1Click:Connect(function() sw("t") end)
+t3.MouseButton1Click:Connect(function() sw("d") end)
+
+local mnd=false
+local mz=UDim2.new(0,300,0,28)
+minBtn.MouseButton1Click:Connect(function()
+	mnd=not mnd
+	if mnd then ct.Visible=false; tbr.Visible=false; main.Size=mz; minBtn.Text="+"
+	else main.Size=fullSize; ct.Visible=true; tbr.Visible=true; minBtn.Text="—" end
+end)
+
+local ob=Instance.new("TextButton")
+ob.Size=UDim2.new(0,36,0,36); ob.Position=UDim2.new(0,10,0.5,-18)
+ob.BackgroundColor3=Color3.fromRGB(25,25,25); ob.BorderSizePixel=0; ob.Text="+"
+ob.TextColor3=C.on; ob.TextSize=22; ob.Font=Enum.Font.GothamBold; ob.Visible=false; ob.Parent=sg
+Instance.new("UICorner",ob).CornerRadius=UDim.new(0,8)
+Instance.new("UIStroke",ob).Color=C.stroke
+
+local function resetAll()
+	cb.Text="старт клик моде"; cb.TextColor3=C.on; cb.BackgroundColor3=C.btn
+	ttb.Text="жми! жми!"; ttb.TextColor3=C.on; ttb.BackgroundColor3=C.btn
+	drawStartBtn.Text="старт рисунок"; drawStartBtn.TextColor3=C.on; drawStartBtn.BackgroundColor3=C.btn
+end
+
+clsBtn.MouseButton1Click:Connect(function()
+	stopSpam(); resetAll(); main.Visible=false; ob.Visible=true
+end)
+ob.MouseButton1Click:Connect(function()
+	main.Visible=true; ob.Visible=false
+	if mnd then mnd=false; main.Size=fullSize; ct.Visible=true; tbr.Visible=true; minBtn.Text="—" end
+end)
+
+cb.MouseButton1Click:Connect(function()
+	if clickMode then stopSpam(); resetAll()
+	else
+		if spamActive then stopSpam() end; resetAll()
+		startClickMode()
+		cb.Text="стоп клик моде"; cb.TextColor3=C.off; cb.BackgroundColor3=Color3.fromRGB(55,25,25)
+	end
+end)
+
+mouse.Button1Down:Connect(function() mouseDown=true end)
+mouse.Button1Up:Connect(function() mouseDown=false end)
+
+drawStartBtn.MouseButton1Click:Connect(function()
+	if drawMode then stopSpam(); resetAll()
+	else
+		if spamActive then stopSpam() end; resetAll()
+		local ok = startDrawMode()
+		if ok then
+			drawStartBtn.Text="стоп рисунок"; drawStartBtn.TextColor3=C.off
+			drawStartBtn.BackgroundColor3=Color3.fromRGB(55,25,25)
+		else
+			drawStartBtn.Text="нарисуй!"; drawStartBtn.TextColor3=C.warn
+			task.delay(1, function()
+				if not drawMode and drawStartBtn.Parent then
+					drawStartBtn.Text="старт рисунок"; drawStartBtn.TextColor3=C.on
+				end
+			end)
+		end
+	end
+end)
+
+local tc={}
+local function rc() ts.CanvasSize=UDim2.new(0,0,0,tsl.AbsoluteContentSize.Y+8) end
+
+local function addTE(p)
+	if p==plr then return end; tc[p]=false
+	local btn=Instance.new("TextButton")
+	btn.Name="T_"..p.Name; btn.Size=UDim2.new(1,0,0,26); btn.BackgroundColor3=C.btn
+	btn.BorderSizePixel=0; btn.Text=""; btn.AutoButtonColor=false; btn.Parent=ts
+	Instance.new("UICorner",btn).CornerRadius=UDim.new(0,4)
+	local bx=Instance.new("Frame"); bx.Size=UDim2.new(0,14,0,14); bx.Position=UDim2.new(0,5,0.5,-7)
+	bx.BackgroundColor3=C.scroll; bx.BorderSizePixel=0; bx.Parent=btn
+	Instance.new("UICorner",bx).CornerRadius=UDim.new(0,3)
+	local bs=Instance.new("UIStroke",bx); bs.Color=Color3.fromRGB(75,75,75); bs.Thickness=1
+	local ck=Instance.new("TextLabel"); ck.Size=UDim2.new(1,0,1,0); ck.BackgroundTransparency=1
+	ck.Text=""; ck.TextColor3=C.on; ck.TextSize=12; ck.Font=Enum.Font.GothamBold; ck.Parent=bx
+	local nm=Instance.new("TextLabel"); nm.Size=UDim2.new(1,-26,1,0); nm.Position=UDim2.new(0,24,0,0)
+	nm.BackgroundTransparency=1; nm.Text=p.DisplayName.." @"..p.Name; nm.TextColor3=C.text
+	nm.TextSize=11; nm.Font=Enum.Font.Gotham; nm.TextXAlignment=Enum.TextXAlignment.Left
+	nm.TextTruncate=Enum.TextTruncate.AtEnd; nm.Parent=btn
+	btn.MouseEnter:Connect(function() btn.BackgroundColor3=C.btnHov end)
+	btn.MouseLeave:Connect(function() btn.BackgroundColor3=tc[p] and C.sel or C.btn end)
+	btn.MouseButton1Click:Connect(function()
+		tc[p]=not tc[p]
+		if tc[p] then ck.Text="✓"; bx.BackgroundColor3=C.on; bs.Color=C.on; btn.BackgroundColor3=C.sel
+		else ck.Text=""; bx.BackgroundColor3=C.scroll; bs.Color=Color3.fromRGB(75,75,75); btn.BackgroundColor3=C.btn end
+	end)
+	task.defer(rc)
+end
+
+local function remTE(p)
+	tc[p]=nil; local e=ts:FindFirstChild("T_"..p.Name); if e then e:Destroy() end
+	if spamActive and not clickMode and not drawMode then
+		local r={}; for pp,v in pairs(tc) do if v then table.insert(r,pp) end end
+		if #r==0 then stopSpam(); resetAll() end
+	end; task.defer(rc)
+end
+
+for _,p in ipairs(game.Players:GetPlayers()) do addTE(p) end
+game.Players.PlayerAdded:Connect(addTE)
+game.Players.PlayerRemoving:Connect(remTE)
+
+ttb.MouseButton1Click:Connect(function()
+	if spamActive and not clickMode and not drawMode then stopSpam(); resetAll()
+	else
+		local tg={}; for p,v in pairs(tc) do if v and p.Parent then table.insert(tg,p) end end
+		if #tg==0 then
+			ttb.Text="выбери бомжа!"; ttb.TextColor3=C.warn
+			task.delay(1,function() if not spamActive and ttb.Parent then ttb.Text="жми! жми!"; ttb.TextColor3=C.on end end)
+			return
+		end
+		if spamActive then stopSpam() end; resetAll()
+		startTargetSpam(tg)
+		ttb.Text="стоп спам"; ttb.TextColor3=C.off; ttb.BackgroundColor3=Color3.fromRGB(55,25,25)
+	end
+end)
+
+UIS.InputBegan:Connect(function(i,g)
+	if g then return end
+	if i.KeyCode==Enum.KeyCode.RightShift then
+		local v=not main.Visible; main.Visible=v; ob.Visible=not v
+	end
+end)
