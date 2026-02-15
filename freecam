@@ -1,0 +1,203 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+local DEFAULT_SPEED = 50
+local SHIFT_MULTIPLIER = 3
+local ZOOM_STEP = 10
+local MIN_SPEED = 5
+local MAX_SPEED = 500
+local SENSITIVITY = 0.3
+
+local freeCamEnabled = false
+local speed = DEFAULT_SPEED
+local moveForward = false
+local moveBackward = false
+local moveLeft = false
+local moveRight = false
+local moveUp = false
+local moveDown = false
+local shiftHeld = false
+local yaw = 0
+local pitch = 0
+local freeCamCFrame = CFrame.new()
+local originalCameraType
+local originalCameraSubject
+local originalMouseBehavior
+local originalWalkSpeed
+local originalJumpPower
+local originalAutoRotate
+local connection = nil
+local anchorConnection = nil
+
+local function enableFreeCam()
+	freeCamEnabled = true
+	speed = DEFAULT_SPEED
+
+	originalCameraType = camera.CameraType
+	originalCameraSubject = camera.CameraSubject
+	originalMouseBehavior = UserInputService.MouseBehavior
+
+	freeCamCFrame = camera.CFrame
+	local lookVector = freeCamCFrame.LookVector
+	yaw = math.atan2(-lookVector.X, -lookVector.Z)
+	pitch = math.asin(lookVector.Y)
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+
+	local character = player.Character
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			originalWalkSpeed = humanoid.WalkSpeed
+			originalJumpPower = humanoid.JumpPower
+			originalAutoRotate = humanoid.AutoRotate
+			humanoid.WalkSpeed = 0
+			humanoid.JumpPower = 0
+			humanoid.AutoRotate = false
+		end
+		local rootPart = character:FindFirstChild("HumanoidRootPart")
+		if rootPart then
+			rootPart.Anchored = true
+		end
+		for _, part in pairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.LocalTransparencyModifier = 1
+			elseif part:IsA("Decal") or part:IsA("Texture") then
+				part.LocalTransparencyModifier = 1
+			end
+		end
+	end
+
+	anchorConnection = RunService.Heartbeat:Connect(function()
+		if not freeCamEnabled then return end
+		local char = player.Character
+		if char then
+			local root = char:FindFirstChild("HumanoidRootPart")
+			if root then
+				root.Anchored = true
+			end
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.WalkSpeed = 0
+				hum.JumpPower = 0
+			end
+			for _, part in pairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.LocalTransparencyModifier = 1
+				elseif part:IsA("Decal") or part:IsA("Texture") then
+					part.LocalTransparencyModifier = 1
+				end
+			end
+		end
+	end)
+
+	connection = RunService.RenderStepped:Connect(function(dt)
+		if not freeCamEnabled then return end
+
+		local moveDir = Vector3.new(0, 0, 0)
+		if moveForward then moveDir = moveDir + Vector3.new(0, 0, -1) end
+		if moveBackward then moveDir = moveDir + Vector3.new(0, 0, 1) end
+		if moveLeft then moveDir = moveDir + Vector3.new(-1, 0, 0) end
+		if moveRight then moveDir = moveDir + Vector3.new(1, 0, 0) end
+		if moveUp then moveDir = moveDir + Vector3.new(0, 1, 0) end
+		if moveDown then moveDir = moveDir + Vector3.new(0, -1, 0) end
+
+		if moveDir.Magnitude > 0 then
+			moveDir = moveDir.Unit
+		end
+
+		local currentSpeed = speed
+		if shiftHeld then
+			currentSpeed = speed * SHIFT_MULTIPLIER
+		end
+
+		local rotation = CFrame.fromEulerAnglesYXZ(pitch, yaw, 0)
+		local translation = rotation:VectorToWorldSpace(moveDir) * currentSpeed * dt
+		freeCamCFrame = CFrame.new(freeCamCFrame.Position + translation) * rotation
+		camera.CFrame = freeCamCFrame
+		camera.CameraType = Enum.CameraType.Scriptable
+	end)
+end
+
+local function disableFreeCam()
+	freeCamEnabled = false
+
+	if connection then connection:Disconnect() connection = nil end
+	if anchorConnection then anchorConnection:Disconnect() anchorConnection = nil end
+
+	camera.CameraType = originalCameraType or Enum.CameraType.Custom
+	camera.CameraSubject = originalCameraSubject or (player.Character and player.Character:FindFirstChildOfClass("Humanoid"))
+	UserInputService.MouseBehavior = originalMouseBehavior or Enum.MouseBehavior.Default
+
+	local character = player.Character
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.WalkSpeed = originalWalkSpeed or 16
+			humanoid.JumpPower = originalJumpPower or 50
+			humanoid.AutoRotate = if originalAutoRotate ~= nil then originalAutoRotate else true
+		end
+		local rootPart = character:FindFirstChild("HumanoidRootPart")
+		if rootPart then
+			rootPart.Anchored = false
+		end
+		for _, part in pairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.LocalTransparencyModifier = 0
+			elseif part:IsA("Decal") or part:IsA("Texture") then
+				part.LocalTransparencyModifier = 0
+			end
+		end
+	end
+
+	moveForward = false
+	moveBackward = false
+	moveLeft = false
+	moveRight = false
+	moveUp = false
+	moveDown = false
+	shiftHeld = false
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.F5 then
+		if freeCamEnabled then disableFreeCam() else enableFreeCam() end
+		return
+	end
+	if not freeCamEnabled then return end
+	if input.KeyCode == Enum.KeyCode.W then moveForward = true
+	elseif input.KeyCode == Enum.KeyCode.S then moveBackward = true
+	elseif input.KeyCode == Enum.KeyCode.A then moveLeft = true
+	elseif input.KeyCode == Enum.KeyCode.D then moveRight = true
+	elseif input.KeyCode == Enum.KeyCode.E or input.KeyCode == Enum.KeyCode.Space then moveUp = true
+	elseif input.KeyCode == Enum.KeyCode.Q or input.KeyCode == Enum.KeyCode.LeftControl then moveDown = true
+	elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then shiftHeld = true
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if not freeCamEnabled then return end
+	if input.KeyCode == Enum.KeyCode.W then moveForward = false
+	elseif input.KeyCode == Enum.KeyCode.S then moveBackward = false
+	elseif input.KeyCode == Enum.KeyCode.A then moveLeft = false
+	elseif input.KeyCode == Enum.KeyCode.D then moveRight = false
+	elseif input.KeyCode == Enum.KeyCode.E or input.KeyCode == Enum.KeyCode.Space then moveUp = false
+	elseif input.KeyCode == Enum.KeyCode.Q or input.KeyCode == Enum.KeyCode.LeftControl then moveDown = false
+	elseif input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then shiftHeld = false
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not freeCamEnabled then return end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		yaw = yaw - math.rad(input.Delta.X * SENSITIVITY)
+		pitch = math.clamp(pitch - math.rad(input.Delta.Y * SENSITIVITY), math.rad(-89), math.rad(89))
+	elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+		speed = math.clamp(speed + input.Position.Z * ZOOM_STEP, MIN_SPEED, MAX_SPEED)
+	end
+end)
